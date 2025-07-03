@@ -272,4 +272,6 @@ export async function reconcile(dataA: any[], dataB: any[]) {
   };
 }
 
+export { parseFile as parseBuffer };
+
 export default router;
