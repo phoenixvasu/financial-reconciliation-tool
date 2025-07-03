@@ -84,7 +84,7 @@ async function getEmbedding(text: string): Promise<number[]> {
       },
     }
   );
-  return response.data.data[0].embedding;
+  return (response.data as any).data[0].embedding;
 }
 
 function matchTransactions(
@@ -218,5 +218,58 @@ router.post(
     }
   }
 );
+
+export async function reconcile(dataA: any[], dataB: any[]) {
+  const matches = [];
+  const unmatchedA = [];
+  const unmatchedB = [...dataB];
+
+  for (const a of dataA) {
+    const aStr = `${a.Description} ${a.Amount} ${a.Date}`;
+    let aEmb: number[];
+    try {
+      aEmb = await getEmbedding(aStr);
+    } catch {
+      unmatchedA.push(a);
+      continue;
+    }
+
+    let bestMatch = null;
+    let bestScore = 0;
+
+    for (const b of unmatchedB) {
+      const bStr = `${b.Description} ${b.Amount} ${b.Date}`;
+      let bEmb: number[];
+      try {
+        bEmb = await getEmbedding(bStr);
+      } catch {
+        continue;
+      }
+      const score = cosineSimilarity(aEmb, bEmb);
+      if (score > bestScore) {
+        bestScore = score;
+        bestMatch = b;
+      }
+    }
+
+    if (bestScore >= 0.85 && bestMatch) {
+      matches.push({
+        file_a_entry: a,
+        file_b_entry: bestMatch,
+        confidence_score: bestScore,
+        match_reason: 'High semantic similarity',
+      });
+      unmatchedB.splice(unmatchedB.indexOf(bestMatch), 1);
+    } else {
+      unmatchedA.push(a);
+    }
+  }
+
+  return {
+    matches,
+    unmatched_file_a_entries: unmatchedA,
+    unmatched_file_b_entries: unmatchedB,
+  };
+}
 
 export default router;
