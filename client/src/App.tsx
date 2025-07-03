@@ -11,7 +11,7 @@ interface ReconcileResult {
   [key: string]: any
 }
 
-const apiUrl = import.meta.env.PROD ? '/api/reconcile' : (import.meta.env.VITE_API_URL || '/api/reconcile');
+const apiUrl = import.meta.env.VITE_API_URL;
 
 function App() {
   const [result, setResult] = useState<ReconcileResult | null>(null)
