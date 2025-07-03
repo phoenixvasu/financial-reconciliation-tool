@@ -5,7 +5,6 @@
     "build": "cd client && npm install && npm run build"
   },
   "dependencies": {
-    "@vendia/serverless-express": "^4.7.4",
     "express": "^5.1.0",
     "cors": "^2.8.5",
     "multer": "^2.0.1",
