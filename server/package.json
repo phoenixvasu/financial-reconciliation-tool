@@ -11,6 +11,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "axios": "^1.10.0",
     "cors": "^2.8.5",
     "csv-parse": "^5.6.0",
     "dotenv": "^17.0.1",
@@ -21,6 +22,7 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
+    "@types/axios": "^0.9.36",
     "@types/csv-parse": "^1.1.12",
     "@types/express": "^5.0.3",
     "@types/multer": "^2.0.0",
