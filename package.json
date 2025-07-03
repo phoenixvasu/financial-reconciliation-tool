@@ -1,7 +1,4 @@
 {
   "name": "financial-reconciliation-tool-root",
-  "private": true,
-  "scripts": {
-    "build": "node vercel-build.js"
-  }
+  "private": true
 } 
