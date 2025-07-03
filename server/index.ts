@@ -10,7 +10,7 @@ app.use(cors());
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-app.post('/', upload.fields([{ name: 'fileA' }, { name: 'fileB' }]), async (req, res): Promise<void> => {
+app.post('/reconcile', upload.fields([{ name: 'fileA' }, { name: 'fileB' }]), async (req, res): Promise<void> => {
   const files = req.files as Record<string, Express.Multer.File[]>;
   const fileA = files['fileA']?.[0];
   const fileB = files['fileB']?.[0];
