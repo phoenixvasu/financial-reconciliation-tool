@@ -189,12 +189,6 @@ VITE_API_URL=http://localhost:3001/reconcile
 
 ---
 
-## License
-
-MIT
-
----
-
 ## Acknowledgements
 
 - [Google Gemini LLM](https://ai.google.dev/)
@@ -204,6 +198,3 @@ MIT
 - [Tailwind CSS](https://tailwindcss.com/)
 
 ---
-
-**This README is fully in sync with your codebase and deployment.  
-If you add new features or change deployment, update the relevant sections!**
