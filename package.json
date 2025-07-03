@@ -3,5 +3,8 @@
   "private": true,
   "scripts": {
     "build": "cd client && npm install && npm run build"
+  },
+  "dependencies": {
+    "@vendia/serverless-express": "^4.7.4"
   }
 } 
