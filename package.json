@@ -1,4 +1,7 @@
 {
   "name": "financial-reconciliation-tool-root",
-  "private": true
+  "private": true,
+  "scripts": {
+    "build": "cd client && npm install && npm run build"
+  }
 } 
