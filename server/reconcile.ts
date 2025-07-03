@@ -1,277 +1,342 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, Router } from 'express';
 import multer from 'multer';
-import { parse as csvParse } from 'csv-parse';
+import { parse as csvParseSync } from 'csv-parse/sync';
 import xlsx from 'xlsx';
 import dotenv from 'dotenv';
-import axios from 'axios';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
 // Load environment variables
 dotenv.config();
 
-const router = express.Router();
+const router: Router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_EMBEDDING_MODEL = 'text-embedding-3-small';
-const AI_SIMILARITY_THRESHOLD = 0.85;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY!;
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+const LLM_MATCH_THRESHOLD = parseFloat(process.env.LLM_MATCH_THRESHOLD || '0.85');
+const AMOUNT_TOLERANCE = 0.01; // Allow small rounding differences
 
-if (!OPENAI_API_KEY) {
-  console.warn('Warning: OPENAI_API_KEY is not set. AI matching will not work.');
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+
+function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-type Transaction = Record<string, any>;
+/**
+ * Normalize any date value to MM/DD/YYYY string
+ */
+function normalizeDateValue(val: any): string {
+  if (val == null) return '';
+  // Excel serial
+  if (typeof val === 'number' && val > 40000 && val < 60000) {
+    const utc_days = Math.floor(val - 25569);
+    const utc_value = utc_days * 86400;
+    const date_info = new Date(utc_value * 1000);
+    const mm = String(date_info.getMonth() + 1).padStart(2, '0');
+    const dd = String(date_info.getDate()).padStart(2, '0');
+    const yyyy = date_info.getFullYear();
+    return `${mm}/${dd}/${yyyy}`;
+  }
+  const valStr = String(val).trim();
+  // MM/DD/YYYY or MM-DD-YYYY
+  let match = valStr.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})$/);
+  if (match) {
+    const mm = match[1].padStart(2, '0');
+    const dd = match[2].padStart(2, '0');
+    const yyyy = match[3];
+    return `${mm}/${dd}/${yyyy}`;
+  }
+  // MM/DD/YY or MM-DD-YY
+  match = valStr.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2})$/);
+  if (match) {
+    const mm = match[1].padStart(2, '0');
+    const dd = match[2].padStart(2, '0');
+    let yy = parseInt(match[3], 10);
+    // 00-49 → 2000-2049, 50-99 → 1950-1999
+    const yyyy = yy < 50 ? (2000 + yy) : (1900 + yy);
+    return `${mm}/${dd}/${yyyy}`;
+  }
+  return valStr;
+}
 
-type MatchMeta = {
-  confidence: number;
-  reason: string;
-  method: 'Exact' | 'AI';
-};
+/**
+ * Recursively normalize all date-like fields in an object
+ */
+function normalizeDatesInObject(obj: Record<string, any>): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      out[key] = normalizeDatesInObject(value);
+    } else if (key.trim().toLowerCase() === 'date') {
+      out[key] = normalizeDateValue(value);
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
 
-function parseFile(buffer: Buffer, originalname: string): Transaction[] {
-  if (originalname.endsWith('.csv')) {
+/**
+ * Force normalization of all 'Date' fields
+ */
+function forceNormalizeDateField(rows: Record<string, any>[]): Record<string, any>[] {
+  return rows.map(row => {
+    const newRow = { ...row };
+    for (const key of Object.keys(newRow)) {
+      if (key.trim().toLowerCase() === 'date') {
+        newRow[key] = normalizeDateValue(newRow[key]);
+      }
+    }
+    return newRow;
+  });
+}
+
+/**
+ * Parse CSV/Excel buffer into objects with normalized dates
+ */
+function parseFile(buffer: Buffer, filename: string): Record<string, any>[] {
+  const ext = filename.toLowerCase().split('.').pop();
+  let rows: Record<string, any>[] = [];
+
+  if (ext === 'csv') {
     const text = buffer.toString('utf-8');
-    // Use csv-parse sync API if available, otherwise fallback to a simple split (for demo)
-    // If csv-parse/sync is not available, you may need to install it or use a different parser
-    try {
-      // @ts-ignore
-      return require('csv-parse/sync').parse(text, { columns: true, skip_empty_lines: true });
-    } catch {
-      // Fallback: naive CSV parsing (not for production)
-      const [header, ...rows] = text.split(/\r?\n/).filter(Boolean);
-      const keys = header.split(',');
-      return rows.map(row => {
-        const values = row.split(',');
-        return Object.fromEntries(keys.map((k, i) => [k, values[i]]));
-      });
-    }
-  } else if (
-    originalname.endsWith('.xlsx') ||
-    originalname.endsWith('.xls')
-  ) {
-    const workbook = xlsx.read(buffer, { type: 'buffer' });
-    const sheetName = workbook.SheetNames[0];
-    const sheet = workbook.Sheets[sheetName];
-    return xlsx.utils.sheet_to_json(sheet);
+    rows = csvParseSync(text, { columns: true, skip_empty_lines: true }) as Record<string, any>[];
+  } else if (ext === 'xlsx' || ext === 'xls') {
+    const workbook = xlsx.read(buffer, { type: 'buffer', cellDates: true });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    rows = xlsx.utils.sheet_to_json(sheet, {
+      defval: '',
+      raw: false,
+      dateNF: 'MM/DD/YYYY'
+    }) as Record<string, any>[];
   } else {
-    throw new Error('Unsupported file type: ' + originalname);
+    throw new Error(`Unsupported file extension: ${ext}`);
   }
+  return rows;
 }
 
-function stringifyTransaction(tx: Transaction): string {
-  // You can customize this to include only relevant fields
-  return Object.values(tx).join(' ');
+/**
+ * Pretty-print for LLM prompt
+ */
+function prettyPrint(row: Record<string, any>): string {
+  return Object.entries(row)
+    .map(([k, v]) => `${k}: ${v}`)
+    .join('\n');
 }
 
-function cosineSimilarity(a: number[], b: number[]): number {
-  const dot = a.reduce((sum, ai, i) => sum + ai * b[i], 0);
-  const normA = Math.sqrt(a.reduce((sum, ai) => sum + ai * ai, 0));
-  const normB = Math.sqrt(b.reduce((sum, bi) => sum + bi * bi, 0));
-  return dot / (normA * normB);
+function datesAreClose(dateA: string, dateB: string, days = 0): boolean {
+  // Compare MM/DD/YYYY strings, allow ±days
+  const [mA, dA, yA] = dateA.split('/').map(Number);
+  const [mB, dB, yB] = dateB.split('/').map(Number);
+  const dtA = new Date(yA, mA - 1, dA);
+  const dtB = new Date(yB, mB - 1, dB);
+  const diff = Math.abs(dtA.getTime() - dtB.getTime());
+  return diff <= days * 86400 * 1000;
 }
 
-async function getEmbedding(text: string): Promise<number[]> {
-  if (!OPENAI_API_KEY) throw new Error('OpenAI API key not set');
-  const response = await axios.post(
-    'https://api.openai.com/v1/embeddings',
-    {
-      input: text,
-      model: OPENAI_EMBEDDING_MODEL,
-    },
-    {
-      headers: {
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-    }
-  );
-  return (response.data as any).data[0].embedding;
+function amountsAreClose(a: any, b: any, tol = AMOUNT_TOLERANCE): boolean {
+  const numA = parseFloat(String(a).replace(/[^\d.-]/g, ''));
+  const numB = parseFloat(String(b).replace(/[^\d.-]/g, ''));
+  return Math.abs(numA - numB) <= tol;
 }
 
-function matchTransactions(
-  a: Transaction[],
-  b: Transaction[]
-): {
-  matched: Transaction[];
-  unmatchedA: Transaction[];
-  unmatchedB: Transaction[];
-  matchesMeta: MatchMeta[];
-} {
-  // Simple matching: by exact stringified row
-  const bSet = new Set(b.map(row => JSON.stringify(row)));
-  const aSet = new Set(a.map(row => JSON.stringify(row)));
+function getRowAmount(row: Record<string, any>): any {
+  if (row['Amount'] && String(row['Amount']).trim() !== '') return row['Amount'];
+  if (row['Credit Amount'] && String(row['Credit Amount']).trim() !== '') return row['Credit Amount'];
+  if (row['Debit Amount'] && String(row['Debit Amount']).trim() !== '') return row['Debit Amount'];
+  return null;
+}
 
-  const matched: Transaction[] = [];
-  const matchesMeta: MatchMeta[] = [];
-  const unmatchedA: Transaction[] = [];
-  const unmatchedB: Transaction[] = [];
-
-  for (const row of a) {
-    const str = JSON.stringify(row);
-    if (bSet.has(str)) {
-      matched.push(row);
-      matchesMeta.push({ confidence: 1, reason: 'Exact match', method: 'Exact' });
-    } else {
-      unmatchedA.push(row);
+// Utility: extract and normalize currency from a row
+function getRowCurrency(row: Record<string, any>): string | null {
+  const currencyFields = ['Currency', 'currency', 'Curr', 'curr', 'Account Currency'];
+  for (const field of currencyFields) {
+    if (row[field] && typeof row[field] === 'string') {
+      return row[field].trim().toUpperCase();
     }
   }
-  for (const row of b) {
-    const str = JSON.stringify(row);
-    if (!aSet.has(str)) {
-      unmatchedB.push(row);
-    }
-  }
-  return { matched, unmatchedA, unmatchedB, matchesMeta };
+  return null;
 }
 
-async function aiMatchTransactions(
-  unmatchedA: Transaction[],
-  unmatchedB: Transaction[],
-  alreadyMatched: Set<string>,
-): Promise<{
-  aiMatched: Transaction[];
-  aiMatchedB: Set<number>;
-  aiMatchesMeta: MatchMeta[];
-}> {
-  if (!OPENAI_API_KEY || unmatchedA.length === 0 || unmatchedB.length === 0) {
-    return { aiMatched: [], aiMatchedB: new Set(), aiMatchesMeta: [] };
-  }
-  const aiMatched: Transaction[] = [];
-  const aiMatchedB = new Set<number>();
-  const aiMatchesMeta: MatchMeta[] = [];
+/**
+ * Use Gemini to compare two rows
+ */
+async function geminiMatchRows(
+  a: Record<string, any>,
+  b: Record<string, any>
+): Promise<{ confidence: number; reason: string }> {
+  const currencyA = getRowCurrency(a);
+  const currencyB = getRowCurrency(b);
+  const amountA = getRowAmount(a);
+  const amountB = getRowAmount(b);
+  const dateA = a['Date'];
+  const dateB = b['Date'];
 
-  // Precompute all embeddings for unmatchedB
-  const bEmbeddings: (number[] | null)[] = await Promise.all(
-    unmatchedB.map(async (tx) => {
+  let notes = [];
+  if (currencyA && currencyB && currencyA !== currencyB) {
+    notes.push(`Currency mismatch: File A = ${currencyA}, File B = ${currencyB}`);
+  }
+  if (dateA && dateB && dateA !== dateB) {
+    notes.push(`Date difference: File A = ${dateA}, File B = ${dateB}`);
+  }
+  if (amountA && amountB && String(amountA) !== String(amountB)) {
+    notes.push(`Amount difference: File A = ${amountA}, File B = ${amountB}`);
+  }
+
+  const notesText = notes.length > 0 ? `\nNOTES:\n${notes.join('\n')}` : '';
+
+  const prompt = `You are a financial reconciliation assistant.\n\nCompare the following two financial transactions and decide if they represent the same real-world event, even if:\n- Descriptions differ semantically (e.g., 'Invoice #123 paid' vs 'Payment for Inv123').\n- Amounts are in different formats or currencies.\n- Dates are off by a few days (e.g., due to posting delays).\n\nInstructions:\n- Ignore superficial differences (punctuation, case, whitespace, synonyms, abbreviations, etc.).\n- If currencies differ, only match if you are highly confident and explain why.\n- If dates are off by a few days, consider posting delays.\n- If amounts are close but not exact, consider rounding or format issues.\n- If you are uncertain, set confidence below 0.85 and explain why.\n- Always provide a clear, human-readable reason for your decision.\n- Output ONLY a single JSON object, with keys: match (true/false), confidence (0–1), reason (brief). Do not include any commentary, markdown, or explanation outside the JSON.\n${notesText}\n\nTransaction A:\n${prettyPrint(a)}\n\nTransaction B:\n${prettyPrint(b)}`;
+
+  const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
+  const result = await model.generateContent([prompt]);
+  const content = result.response.text();
+
+  try {
+    return parseGeminiResponse(content);
+  } catch (err) {
+    console.error('Failed to parse Gemini response:', content);
+    // Try to extract the first JSON object using regex
+    const match = content.match(/{[\s\S]*}/);
+    if (match) {
       try {
-        return await getEmbedding(stringifyTransaction(tx));
-      } catch {
-        return null;
+        return parseGeminiResponse(match[0]);
+      } catch (err2) {
+        // Still failed
       }
-    })
-  );
+    }
+    // Final fallback
+    return { confidence: 0, reason: 'Failed to parse Gemini response' };
+  }
+}
 
-  for (let i = 0; i < unmatchedA.length; ++i) {
-    const txA = unmatchedA[i];
-    let bestScore = -1;
-    let bestIdx = -1;
+function parseGeminiResponse(content: string): { confidence: number; reason: string } {
+  const json = JSON.parse(content);
+  let reason = json.reason || 'No reason provided';
+  return {
+    confidence: typeof json.confidence === 'number' ? json.confidence : 0,
+    reason
+  };
+}
+
+// Enhanced reconciliation
+export async function reconcile(
+  dataA: Record<string, any>[],
+  dataB: Record<string, any>[]
+) {
+  const matches: any[] = [];
+  const unmatchedA: Record<string, any>[] = [];
+  const unmatchedB: Record<string, any>[] = [];
+  const usedA = new Set<number>();
+  const usedB = new Set<number>();
+  const llmCandidates: any[] = [];
+
+  // Normalize all dates in both files
+  const normA = dataA.map(normalizeDatesInObject);
+  const normB = dataB.map(normalizeDatesInObject);
+
+  // Only 1-to-1 matching
+  for (let i = 0; i < normA.length; i++) {
+    if (usedA.has(i)) continue;
+    const a = normA[i];
+    const dateA = a['Date'];
+    const amountA = getRowAmount(a);
+    const candidates = normB
+      .map((b, idx) => ({ b, idx }))
+      .filter(({ b, idx }) =>
+        !usedB.has(idx) &&
+        b['Date'] &&
+        datesAreClose(dateA, b['Date'], 3) &&
+        amountsAreClose(amountA, getRowAmount(b), 100)
+      );
+    let best = null;
+    let bestConfidence = 0;
     let bestReason = '';
-    let aEmbedding: number[] | null = null;
-    try {
-      aEmbedding = await getEmbedding(stringifyTransaction(txA));
-    } catch {
-      continue;
-    }
-    for (let j = 0; j < unmatchedB.length; ++j) {
-      if (aiMatchedB.has(j)) continue;
-      const bEmbedding = bEmbeddings[j];
-      if (!bEmbedding) continue;
-      const score = cosineSimilarity(aEmbedding!, bEmbedding);
-      if (score > bestScore) {
-        bestScore = score;
-        bestIdx = j;
-        bestReason = `AI match, cosine similarity: ${score.toFixed(3)}`;
-      }
-    }
-    if (bestScore >= AI_SIMILARITY_THRESHOLD && bestIdx !== -1) {
-      aiMatched.push(txA);
-      aiMatchedB.add(bestIdx);
-      aiMatchesMeta.push({ confidence: bestScore, reason: bestReason, method: 'AI' });
-      alreadyMatched.add(JSON.stringify(txA));
-    }
-  }
-  return { aiMatched, aiMatchedB, aiMatchesMeta };
-}
-
-router.post(
-  '/reconcile',
-  upload.fields([
-    { name: 'fileA', maxCount: 1 },
-    { name: 'fileB', maxCount: 1 },
-  ]),
-  async (req: Request, res: Response): Promise<void> => {
-    try {
-      const files = req.files as Record<string, Express.Multer.File[]>;
-      if (!files.fileA?.[0] || !files.fileB?.[0]) {
-        res.status(400).json({ message: 'Both files are required.' });
-        return;
-      }
-      const fileA = files.fileA[0];
-      const fileB = files.fileB[0];
-      const dataA = parseFile(fileA.buffer, fileA.originalname);
-      const dataB = parseFile(fileB.buffer, fileB.originalname);
-      // Step 1: Exact match
-      const { matched, unmatchedA, unmatchedB, matchesMeta } = matchTransactions(dataA, dataB);
-      // Step 2: AI-powered match
-      const alreadyMatched = new Set(matched.map(row => JSON.stringify(row)));
-      const { aiMatched, aiMatchedB, aiMatchesMeta } = await aiMatchTransactions(unmatchedA, unmatchedB, alreadyMatched);
-      // Remove AI-matched from unmatched lists
-      const finalUnmatchedA = unmatchedA.filter(tx => !alreadyMatched.has(JSON.stringify(tx)));
-      const finalUnmatchedB = unmatchedB.filter((_, idx) => !aiMatchedB.has(idx));
-      res.json({
-        matched_transactions: [...matched, ...aiMatched],
-        unmatched_transactions_fileA: finalUnmatchedA,
-        unmatched_transactions_fileB: finalUnmatchedB,
-        match_confidence: [...matchesMeta, ...aiMatchesMeta],
-      });
-    } catch (err: any) {
-      res.status(500).json({ message: err.message || 'Internal server error' });
-    }
-  }
-);
-
-export async function reconcile(dataA: any[], dataB: any[]) {
-  const matches = [];
-  const unmatchedA = [];
-  const unmatchedB = [...dataB];
-
-  for (const a of dataA) {
-    const aStr = `${a.Description} ${a.Amount} ${a.Date}`;
-    let aEmb: number[];
-    try {
-      aEmb = await getEmbedding(aStr);
-    } catch {
-      unmatchedA.push(a);
-      continue;
-    }
-
-    let bestMatch = null;
-    let bestScore = 0;
-
-    for (const b of unmatchedB) {
-      const bStr = `${b.Description} ${b.Amount} ${b.Date}`;
-      let bEmb: number[];
-      try {
-        bEmb = await getEmbedding(bStr);
-      } catch {
-        continue;
-      }
-      const score = cosineSimilarity(aEmb, bEmb);
-      if (score > bestScore) {
-        bestScore = score;
-        bestMatch = b;
-      }
-    }
-
-    if (bestScore >= 0.85 && bestMatch) {
-      matches.push({
+    let bestIdx = -1;
+    for (const { b, idx } of candidates) {
+      console.log('[LLM MATCH] Comparing FileA row', i, 'with FileB row', idx);
+      console.log('FileA entry:', JSON.stringify(a, null, 2));
+      console.log('FileB entry:', JSON.stringify(b, null, 2));
+      const { confidence, reason } = await geminiMatchRows(a, b);
+      llmCandidates.push({
         file_a_entry: a,
-        file_b_entry: bestMatch,
-        confidence_score: bestScore,
-        match_reason: 'High semantic similarity',
+        file_b_entry: b,
+        confidence_score: parseFloat(confidence.toFixed(2)),
+        match_reason: reason,
+        file_a_index: i,
+        file_b_index: idx
       });
-      unmatchedB.splice(unmatchedB.indexOf(bestMatch), 1);
-    } else {
-      unmatchedA.push(a);
+      if (confidence > bestConfidence) {
+        best = b;
+        bestConfidence = confidence;
+        bestReason = reason;
+        bestIdx = idx;
+      }
     }
+    if (best && bestConfidence >= LLM_MATCH_THRESHOLD) {
+      matches.push({
+        type: '1-to-1',
+        file_a_entry: a,
+        file_b_entry: best,
+        confidence_score: parseFloat(bestConfidence.toFixed(2)),
+        match_reason: bestReason,
+      });
+      usedA.add(i);
+      usedB.add(bestIdx);
+    }
+  }
+
+  // Unmatched
+  for (let i = 0; i < normA.length; i++) {
+    if (!usedA.has(i) && !unmatchedA.includes(normA[i])) unmatchedA.push(normA[i]);
+  }
+  for (let j = 0; j < normB.length; j++) {
+    if (!usedB.has(j) && !unmatchedB.includes(normB[j])) unmatchedB.push(normB[j]);
   }
 
   return {
     matches,
     unmatched_file_a_entries: unmatchedA,
     unmatched_file_b_entries: unmatchedB,
+    llm_candidates: llmCandidates
   };
 }
 
-export { parseFile as parseBuffer };
+// Route setup
+router.post(
+  '/reconcile',
+  upload.fields([
+    { name: 'fileA', maxCount: 1 },
+    { name: 'fileB', maxCount: 1 },
+  ]),
+  async (req: Request, res: Response) => {
+    try {
+      const files = req.files as Record<string, Express.Multer.File[]>;
+      const fileA = files.fileA?.[0];
+      const fileB = files.fileB?.[0];
+
+      if (!fileA || !fileB) {
+        res.status(400).json({ error: 'Both fileA and fileB are required.' });
+        return;
+      }
+
+      const dataA = parseFile(fileA.buffer, fileA.originalname);
+      const dataB = parseFile(fileB.buffer, fileB.originalname);
+
+      // Warn if too many LLM calls for free tier
+      if (dataA.length > 15 || dataB.length > 15) {
+        res.status(400).json({ error: 'Too many rows for Gemini free tier. Please upload smaller files.' });
+        return;
+      }
+
+      const result = await reconcile(dataA, dataB);
+      res.json(result);
+    } catch (error: any) {
+      console.error('Reconciliation error:', error);
+      res.status(500).json({ error: (error && error.message) ? String(error.message) : 'Internal Server Error' });
+    }
+  }
+);
 
 export default router;
+
+export { parseFile, parseFile as parseBuffer, geminiMatchRows };

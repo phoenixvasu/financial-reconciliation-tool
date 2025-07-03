@@ -28,4 +28,11 @@ app.post('/reconcile', upload.fields([{ name: 'fileA' }, { name: 'fileB' }]), as
   }
 });
 
-app.listen(5000, () => console.log('Server running on port 5000'));
+export default app;
+
+if (require.main === module) {
+  const PORT = process.env.PORT || 3001;
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
