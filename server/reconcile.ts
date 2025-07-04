@@ -18,10 +18,6 @@ const AMOUNT_TOLERANCE = 0.01; // Allow small rounding differences
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
-function sleep(ms: number) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 /**
  * Normalize any date value to MM/DD/YYYY string
  */
@@ -74,21 +70,6 @@ function normalizeDatesInObject(obj: Record<string, any>): Record<string, any> {
     }
   }
   return out;
-}
-
-/**
- * Force normalization of all 'Date' fields
- */
-function forceNormalizeDateField(rows: Record<string, any>[]): Record<string, any>[] {
-  return rows.map(row => {
-    const newRow = { ...row };
-    for (const key of Object.keys(newRow)) {
-      if (key.trim().toLowerCase() === 'date') {
-        newRow[key] = normalizeDateValue(newRow[key]);
-      }
-    }
-    return newRow;
-  });
 }
 
 /**
@@ -158,64 +139,36 @@ function getRowCurrency(row: Record<string, any>): string | null {
   return null;
 }
 
-/**
- * Use Gemini to compare two rows
- */
-async function geminiMatchRows(
+// Add new batch LLM function
+async function geminiBatchMatchRow(
   a: Record<string, any>,
-  b: Record<string, any>
-): Promise<{ confidence: number; reason: string }> {
-  const currencyA = getRowCurrency(a);
-  const currencyB = getRowCurrency(b);
-  const amountA = getRowAmount(a);
-  const amountB = getRowAmount(b);
-  const dateA = a['Date'];
-  const dateB = b['Date'];
-
-  let notes = [];
-  if (currencyA && currencyB && currencyA !== currencyB) {
-    notes.push(`Currency mismatch: File A = ${currencyA}, File B = ${currencyB}`);
-  }
-  if (dateA && dateB && dateA !== dateB) {
-    notes.push(`Date difference: File A = ${dateA}, File B = ${dateB}`);
-  }
-  if (amountA && amountB && String(amountA) !== String(amountB)) {
-    notes.push(`Amount difference: File A = ${amountA}, File B = ${amountB}`);
-  }
-
-  const notesText = notes.length > 0 ? `\nNOTES:\n${notes.join('\n')}` : '';
-
-  const prompt = `You are a financial reconciliation assistant.\n\nCompare the following two financial transactions and decide if they represent the same real-world event, even if:\n- Descriptions differ semantically (e.g., 'Invoice #123 paid' vs 'Payment for Inv123').\n- Amounts are in different formats or currencies.\n- Dates are off by a few days (e.g., due to posting delays).\n\nInstructions:\n- Ignore superficial differences (punctuation, case, whitespace, synonyms, abbreviations, etc.).\n- If currencies differ, only match if you are highly confident and explain why.\n- If dates are off by a few days, consider posting delays.\n- If amounts are close but not exact, consider rounding or format issues.\n- If you are uncertain, set confidence below 0.85 and explain why.\n- Always provide a clear, human-readable reason for your decision.\n- Output ONLY a single JSON object, with keys: match (true/false), confidence (0–1), reason (brief). Do not include any commentary, markdown, or explanation outside the JSON.\n${notesText}\n\nTransaction A:\n${prettyPrint(a)}\n\nTransaction B:\n${prettyPrint(b)}`;
+  candidates: { b: Record<string, any>; idx: number }[]
+): Promise<Array<{ file_b_index: number; match: boolean; confidence: number; reason: string }>> {
+  if (candidates.length === 0) return [];
+  const fileAString = prettyPrint(a);
+  const candidatesString = candidates
+    .map(({ b, idx }) => `${idx}:\n${prettyPrint(b)}`)
+    .join('\n\n');
+  const prompt = `You are a financial reconciliation expert.\n\nYour task is to compare the following File A transaction to each of the File B candidates. For each candidate, output a JSON object with: file_b_index, match (true/false), confidence (0-1), and a clear, human-readable reason.\n\n**Instructions:**\n- Consider all possible reasons two transactions may represent the same real-world event, even if there are differences in description, date, amount, or currency.\n- If you detect a possible partial payment, duplicate, or ambiguous record, explain this in the reason and set confidence accordingly.\n- If the amounts are close but not exact, consider rounding, partial payments, or splits.\n- If the dates are off by a few days, consider posting delays.\n- If currencies differ, only match if you are highly confident and explain why.\n- If you are uncertain, set confidence below 0.85 and explain why.\n- Always provide a clear, concise reason for your decision, mentioning any edge cases (partial payment, duplicate, ambiguous, currency/format mismatch, etc.) if relevant.\n\n**Confidence Scoring System:**\n- Use the full range from 0 (no match) to 1 (perfect match).\n- 0.95–1.0: Nearly certain match (all key fields align, only minor differences).\n- 0.85–0.94: Strong match, but with some uncertainty (e.g., minor field differences, plausible but not perfect).\n- 0.7–0.84: Possible match, but notable uncertainty (e.g., partial payment, ambiguous description, or multiple plausible candidates).\n- 0.5–0.69: Weak match, only some fields align, or possible duplicate/ambiguous.\n- 0.2–0.49: Very weak match, unlikely but not impossible.\n- 0–0.19: No meaningful match.\n- Justify the confidence score in your reason.\n\n- Output ONLY a single JSON array, one object per File B candidate, in the same order as below. Do not include any commentary, markdown, or explanation outside the JSON.\n\nFile A:\n${fileAString}\n\nFile B candidates:\n${candidatesString}`;
 
   const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
   const result = await model.generateContent([prompt]);
   const content = result.response.text();
-
   try {
-    return parseGeminiResponse(content);
+    // Try to parse the first JSON array in the response
+    const match = content.match(/\[[\s\S]*?\]/);
+    const arr = match ? JSON.parse(match[0]) : JSON.parse(content);
+    return arr.map((obj: any) => ({
+      file_b_index: obj.file_b_index,
+      match: !!obj.match,
+      confidence: typeof obj.confidence === 'number' ? obj.confidence : 0,
+      reason: obj.reason || 'No reason provided',
+    }));
   } catch (err) {
-    console.error('Failed to parse Gemini response:', content);
-    // Try to extract the first JSON object using regex
-    const match = content.match(/{[\s\S]*}/);
-    if (match) {
-      try {
-        return parseGeminiResponse(match[0]);
-      } catch (err2) {
-        // Still failed
-      }
-    }
-    // Final fallback
-    return { confidence: 0, reason: 'Failed to parse Gemini response' };
+    console.error('Failed to parse Gemini batch response:', content);
+    // Fallback: return empty array
+    return [];
   }
-}
-
-function parseGeminiResponse(content: string): { confidence: number; reason: string } {
-  const json = JSON.parse(content);
-  let reason = json.reason || 'No reason provided';
-  return {
-    confidence: typeof json.confidence === 'number' ? json.confidence : 0,
-    reason
-  };
 }
 
 // Enhanced reconciliation
@@ -234,7 +187,7 @@ export async function reconcile(
   const normA = dataA.map(normalizeDatesInObject);
   const normB = dataB.map(normalizeDatesInObject);
 
-  // Only 1-to-1 matching
+  // Only 1-to-1 matching, but batch LLM calls per File A row
   for (let i = 0; i < normA.length; i++) {
     if (usedA.has(i)) continue;
     const a = normA[i];
@@ -245,38 +198,41 @@ export async function reconcile(
       .filter(({ b, idx }) =>
         !usedB.has(idx) &&
         b['Date'] &&
-        datesAreClose(dateA, b['Date'], 3) &&
-        amountsAreClose(amountA, getRowAmount(b), 100)
+        datesAreClose(dateA, b['Date'], 7) &&
+        amountsAreClose(amountA, getRowAmount(b), 500)
       );
-    let best = null;
-    let bestConfidence = 0;
-    let bestReason = '';
-    let bestIdx = -1;
-    for (const { b, idx } of candidates) {
-      console.log('[LLM MATCH] Comparing FileA row', i, 'with FileB row', idx);
-      console.log('FileA entry:', JSON.stringify(a, null, 2));
-      console.log('FileB entry:', JSON.stringify(b, null, 2));
-      const { confidence, reason } = await geminiMatchRows(a, b);
+    if (candidates.length === 0) continue;
+    // Batch LLM call for this File A row
+    console.log(`[LLM BATCH] FileA row ${i} with ${candidates.length} FileB candidates`);
+    const batchResults = await geminiBatchMatchRow(a, candidates);
+    // Add all LLM candidate results for explainability
+    for (let j = 0; j < batchResults.length; j++) {
+      const { file_b_index, match, confidence, reason } = batchResults[j];
       llmCandidates.push({
         file_a_entry: a,
-        file_b_entry: b,
+        file_b_entry: normB[file_b_index],
         confidence_score: parseFloat(confidence.toFixed(2)),
         match_reason: reason,
         file_a_index: i,
-        file_b_index: idx
+        file_b_index,
       });
-      if (confidence > bestConfidence) {
-        best = b;
-        bestConfidence = confidence;
-        bestReason = reason;
-        bestIdx = idx;
+    }
+    // Find best match above threshold
+    let bestIdx = -1;
+    let bestConfidence = 0;
+    let bestReason = '';
+    for (const res of batchResults) {
+      if (res.confidence > bestConfidence && res.match) {
+        bestConfidence = res.confidence;
+        bestIdx = res.file_b_index;
+        bestReason = res.reason;
       }
     }
-    if (best && bestConfidence >= LLM_MATCH_THRESHOLD) {
+    if (bestIdx !== -1 && bestConfidence >= LLM_MATCH_THRESHOLD) {
       matches.push({
         type: '1-to-1',
         file_a_entry: a,
-        file_b_entry: best,
+        file_b_entry: normB[bestIdx],
         confidence_score: parseFloat(bestConfidence.toFixed(2)),
         match_reason: bestReason,
       });
@@ -339,4 +295,4 @@ router.post(
 
 export default router;
 
-export { parseFile, parseFile as parseBuffer, geminiMatchRows };
+export { parseFile, parseFile as parseBuffer, geminiBatchMatchRow };

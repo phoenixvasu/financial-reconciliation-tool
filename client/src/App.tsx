@@ -1,8 +1,8 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import axios from 'axios'
 import FileUpload from './components/FileUpload'
 import './App.css'
-import { CheckCircleIcon, ExclamationCircleIcon, DocumentDuplicateIcon } from '@heroicons/react/24/outline'
+import { CheckCircleIcon, ExclamationCircleIcon } from '@heroicons/react/24/outline'
 
 interface ReconcileResult {
   matched: any[]
@@ -19,9 +19,21 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
-  const [tab, setTab] = useState<'matched' | 'unmatchedA' | 'unmatchedB' | 'review' | 'llmCandidates'>('matched')
-  const [showRaw, setShowRaw] = useState(false)
+  const [tab, setTab] = useState<'matched' | 'unmatchedA' | 'unmatchedB' | 'review' | 'llmCandidates' | 'rawJson'>('matched')
   const [reviewed, setReviewed] = useState<{ [key: number]: 'confirmed' | 'rejected' | undefined }>({})
+
+  // Pagination state
+  const [page, setPage] = useState(1);
+  const rowsPerPage = 10;
+
+  // Reset page on tab change
+  useEffect(() => { setPage(1); }, [tab, result]);
+
+  // Pagination helper
+  const paginate = (rows: any[]) => {
+    const start = (page - 1) * rowsPerPage;
+    return rows.slice(start, start + rowsPerPage);
+  };
 
   const handleSubmit = async ({ fileA, fileB }: { fileA: File; fileB: File }) => {
     setLoading(true)
@@ -68,6 +80,7 @@ function App() {
     if (!rows || rows.length === 0) {
       return <div className="text-gray-500 text-center py-8">No records found.</div>
     }
+    const pagedRows = paginate(rows);
     if (type === 'matched') {
       return (
         <div className="overflow-x-auto">
@@ -81,7 +94,7 @@ function App() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((row, i) => (
+              {pagedRows.map((row, i) => (
                 <tr key={i} className="hover:bg-blue-50">
                   <td className="px-2 py-2 border-b align-top whitespace-pre-wrap">
                     {row.file_a_entry ? (
@@ -115,6 +128,13 @@ function App() {
               ))}
             </tbody>
           </table>
+          {rows.length > rowsPerPage && (
+            <div className="flex justify-center items-center gap-2 mt-2">
+              <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1} className="px-2 py-1 rounded bg-gray-200 disabled:opacity-50">Prev</button>
+              <span className="text-xs text-gray-700">Page {page} of {Math.ceil(rows.length / rowsPerPage)}</span>
+              <button onClick={() => setPage(p => Math.min(Math.ceil(rows.length / rowsPerPage), p + 1))} disabled={page === Math.ceil(rows.length / rowsPerPage)} className="px-2 py-1 rounded bg-gray-200 disabled:opacity-50">Next</button>
+            </div>
+          )}
         </div>
       )
     } else {
@@ -128,7 +148,7 @@ function App() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((row, i) => (
+              {pagedRows.map((row, i) => (
                 <tr key={i} className="hover:bg-yellow-50">
                   <td className="px-2 py-2 border-b align-top whitespace-pre-wrap">
                     <pre className="bg-gray-50 rounded p-2 text-xs whitespace-pre-wrap">{JSON.stringify(row, null, 2)}</pre>
@@ -137,6 +157,13 @@ function App() {
               ))}
             </tbody>
           </table>
+          {rows.length > rowsPerPage && (
+            <div className="flex justify-center items-center gap-2 mt-2">
+              <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1} className="px-2 py-1 rounded bg-gray-200 disabled:opacity-50">Prev</button>
+              <span className="text-xs text-gray-700">Page {page} of {Math.ceil(rows.length / rowsPerPage)}</span>
+              <button onClick={() => setPage(p => Math.min(Math.ceil(rows.length / rowsPerPage), p + 1))} disabled={page === Math.ceil(rows.length / rowsPerPage)} className="px-2 py-1 rounded bg-gray-200 disabled:opacity-50">Next</button>
+            </div>
+          )}
         </div>
       )
     }
@@ -150,6 +177,7 @@ function App() {
     if (!rows || rows.length === 0) {
       return <div className="text-gray-500 text-center py-8">No records to review.</div>;
     }
+    const pagedRows = paginate(rows);
     return (
       <div className="overflow-x-auto">
         <table className="min-w-full bg-white rounded shadow text-xs md:text-sm">
@@ -163,7 +191,7 @@ function App() {
             </tr>
           </thead>
           <tbody>
-            {rows.map((row, i) => (
+            {pagedRows.map((row, i) => (
               <tr key={i} className="hover:bg-blue-50">
                 <td className="px-2 py-2 border-b align-top whitespace-pre-wrap">
                   {row.file_a_entry ? (
@@ -207,6 +235,13 @@ function App() {
             ))}
           </tbody>
         </table>
+        {rows.length > rowsPerPage && (
+          <div className="flex justify-center items-center gap-2 mt-2">
+            <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1} className="px-2 py-1 rounded bg-gray-200 disabled:opacity-50">Prev</button>
+            <span className="text-xs text-gray-700">Page {page} of {Math.ceil(rows.length / rowsPerPage)}</span>
+            <button onClick={() => setPage(p => Math.min(Math.ceil(rows.length / rowsPerPage), p + 1))} disabled={page === Math.ceil(rows.length / rowsPerPage)} className="px-2 py-1 rounded bg-gray-200 disabled:opacity-50">Next</button>
+          </div>
+        )}
       </div>
     );
   };
@@ -215,6 +250,7 @@ function App() {
     if (!rows || rows.length === 0) {
       return <div className="text-gray-500 text-center py-8">No LLM candidate pairs found.</div>;
     }
+    const pagedRows = paginate(rows);
     return (
       <div className="overflow-x-auto">
         <table className="min-w-full bg-white rounded shadow text-xs md:text-sm">
@@ -229,7 +265,7 @@ function App() {
             </tr>
           </thead>
           <tbody>
-            {rows.map((row, i) => (
+            {pagedRows.map((row, i) => (
               <tr key={i} className="hover:bg-blue-50">
                 <td className="px-2 py-2 border-b align-top text-center">{row.file_a_index}</td>
                 <td className="px-2 py-2 border-b align-top text-center">{row.file_b_index}</td>
@@ -253,13 +289,22 @@ function App() {
             ))}
           </tbody>
         </table>
+        {rows.length > rowsPerPage && (
+          <div className="flex justify-center items-center gap-2 mt-2">
+            <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1} className="px-2 py-1 rounded bg-gray-200 disabled:opacity-50">Prev</button>
+            <span className="text-xs text-gray-700">Page {page} of {Math.ceil(rows.length / rowsPerPage)}</span>
+            <button onClick={() => setPage(p => Math.min(Math.ceil(rows.length / rowsPerPage), p + 1))} disabled={page === Math.ceil(rows.length / rowsPerPage)} className="px-2 py-1 rounded bg-gray-200 disabled:opacity-50">Next</button>
+          </div>
+        )}
       </div>
     );
   };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-blue-100 py-10 px-2">
-      <h1 className="text-4xl font-extrabold text-center mb-8 text-blue-800 drop-shadow">Financial Reconciliation Tool</h1>
+      <div className="flex justify-between items-center max-w-3xl mx-auto mb-4">
+        <h1 className="text-4xl font-extrabold text-center text-blue-800 drop-shadow">Financial Reconciliation Tool</h1>
+      </div>
       <div className="max-w-3xl mx-auto">
         {error && (
           <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4 text-center">
@@ -281,48 +326,60 @@ function App() {
           <div className="mt-10">
             <div className="mb-6 flex flex-wrap gap-4 justify-center">
               {getMeta()?.map(meta => (
-                <div key={meta.label} className="flex items-center gap-2 bg-white shadow px-5 py-3 rounded-lg text-blue-900 text-base font-semibold">
+                <div key={meta.label} className="flex items-center gap-2 bg-white shadow px-5 py-3 rounded-lg text-blue-900 text-base font-semibold" title={meta.label} tabIndex={0} aria-label={meta.label}>
                   {meta.icon}
                   {meta.label}: <span className="font-bold text-blue-700 text-lg">{meta.value}</span>
                 </div>
               ))}
-      </div>
-            <div className="mb-6 flex justify-center gap-2">
+            </div>
+            <div className="mb-6 flex justify-center gap-2 sticky top-0 z-10 shadow rounded-t-lg">
               <button
                 className={`px-4 py-2 rounded-t-lg font-semibold border-b-2 transition-all duration-150 ${tab === 'matched' ? 'bg-blue-600 text-white border-blue-700' : 'bg-white text-blue-700 border-transparent hover:bg-blue-100'}`}
                 onClick={() => setTab('matched')}
+                aria-selected={tab === 'matched'}
+                role="tab"
               >
                 Matched
               </button>
               <button
                 className={`px-4 py-2 rounded-t-lg font-semibold border-b-2 transition-all duration-150 ${tab === 'unmatchedA' ? 'bg-yellow-400 text-yellow-900 border-yellow-600' : 'bg-white text-yellow-700 border-transparent hover:bg-yellow-100'}`}
                 onClick={() => setTab('unmatchedA')}
+                aria-selected={tab === 'unmatchedA'}
+                role="tab"
               >
                 Unmatched in File A
               </button>
               <button
                 className={`px-4 py-2 rounded-t-lg font-semibold border-b-2 transition-all duration-150 ${tab === 'unmatchedB' ? 'bg-yellow-400 text-yellow-900 border-yellow-600' : 'bg-white text-yellow-700 border-transparent hover:bg-yellow-100'}`}
                 onClick={() => setTab('unmatchedB')}
+                aria-selected={tab === 'unmatchedB'}
+                role="tab"
               >
                 Unmatched in File B
               </button>
               <button
                 className={`px-4 py-2 rounded-t-lg font-semibold border-b-2 transition-all duration-150 ${tab === 'review' ? 'bg-gray-400 text-gray-900 border-gray-600' : 'bg-white text-gray-700 border-transparent hover:bg-gray-100'}`}
                 onClick={() => setTab('review')}
+                aria-selected={tab === 'review'}
+                role="tab"
               >
                 Review
               </button>
               <button
                 className={`px-4 py-2 rounded-t-lg font-semibold border-b-2 transition-all duration-150 ${tab === 'llmCandidates' ? 'bg-purple-600 text-white border-purple-700' : 'bg-white text-purple-700 border-transparent hover:bg-purple-100'}`}
                 onClick={() => setTab('llmCandidates')}
+                aria-selected={tab === 'llmCandidates'}
+                role="tab"
               >
                 All LLM Candidates
               </button>
               <button
-                className="ml-4 px-3 py-2 rounded-lg bg-gray-200 hover:bg-gray-300 text-gray-700 font-semibold flex items-center gap-1"
-                onClick={() => setShowRaw(v => !v)}
+                className={`px-4 py-2 rounded-t-lg font-semibold border-b-2 transition-all duration-150 ${tab === 'rawJson' ? 'bg-gray-800 text-white border-gray-900' : 'bg-white text-gray-700 border-transparent hover:bg-gray-200'}`}
+                onClick={() => setTab('rawJson')}
+                aria-selected={tab === 'rawJson'}
+                role="tab"
               >
-                <DocumentDuplicateIcon className="w-5 h-5 inline-block" /> Raw JSON
+                Raw JSON
         </button>
             </div>
             <div className="bg-white rounded-b-lg shadow-lg p-4">
@@ -331,15 +388,15 @@ function App() {
               {tab === 'unmatchedB' && renderTable(result.unmatchedB, 'unmatchedB')}
               {tab === 'review' && renderReviewTable(result.matched)}
               {tab === 'llmCandidates' && renderLLMCandidatesTable(result.llm_candidates)}
-            </div>
-            {showRaw && (
-              <div className="mt-8">
-                <h2 className="text-xl font-semibold mb-2">Raw JSON Response</h2>
-                <div className="bg-gray-900 text-green-200 rounded p-4 overflow-x-auto max-h-96">
-                  <pre className="whitespace-pre-wrap break-all text-xs md:text-sm">{JSON.stringify(rawJson, null, 2)}</pre>
+              {tab === 'rawJson' && (
+                <div className="mt-2">
+                  <h2 className="text-xl font-semibold mb-2">Raw JSON Response</h2>
+                  <div className="bg-gray-900 text-green-200 rounded p-4 overflow-x-auto max-h-96">
+                    <pre className="whitespace-pre-wrap break-all text-xs md:text-sm">{JSON.stringify(rawJson, null, 2)}</pre>
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
+            </div>
           </div>
         )}
       </div>
